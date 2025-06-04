@@ -232,160 +232,269 @@ class SG_Nav_Agent():
         goal_prediction = copy.deepcopy(self.current_obj_predictions)
         obj_labels = self.current_obj_predictions.get_field("labels")
         goal_bbox = []
+        # 遍历检测到的物体标签
         for j, label in enumerate(obj_labels):
+            # 如果目标物体的标签与当前检测到的标签相同
             if self.obj_goal in label:
+                # 将该物体的边界框添加到goal_bbox列表中
                 goal_bbox.append(self.current_obj_predictions.bbox[j])
+            # 如果目标物体是健身器材，且当前标签是跑步机或健身器械
             elif self.obj_goal == 'gym_equipment' and (label in ['treadmill', 'exercise machine']):
+                # 将该物体的边界框添加到goal_bbox列表中
                 goal_bbox.append(self.current_obj_predictions.bbox[j])
         
+        # 遍历检测到的物体标签
         for j, label in enumerate(obj_labels):
+            # 如果标签在原始21类物体类别中
             if label in categories_21_origin:
+                # 获取该物体的置信度分数
                 confidence = self.current_obj_predictions.get_field("scores")[j]
+                # 获取该物体的边界框，并转换为int64类型
                 bbox = self.current_obj_predictions.bbox[j].to(torch.int64)
+                # 计算物体中心点坐标
                 center_point = (bbox[:2] + bbox[2:]) // 2
+                # 计算物体中心点相对于图像中心的偏移角度
                 temp_direction = (center_point[0] - 320) * 79 / 640
+                # 获取深度图中该中心点的距离
                 temp_distance = self.depth[center_point[1],center_point[0],0]
+                # 如果距离大于等于阈值则跳过该物体
                 if temp_distance >= self.distance_threshold:
                     continue
+                # 根据方向和距离计算物体在全局地图中的GPS坐标
                 obj_gps = self.get_goal_gps(observations, temp_direction, temp_distance)
+                # 将GPS坐标转换为地图上的像素坐标x
                 x = int(self.map_size_cm/10-obj_gps[1]*100/self.resolution)
+                # 将GPS坐标转换为地图上的像素坐标y
                 y = int(self.map_size_cm/10+obj_gps[0]*100/self.resolution)
+                # 将置信度、x、y添加到对应类别的物体位置列表中
                 self.obj_locations[categories_21_origin.index(label)].append([confidence, x, y])
         
+        # 检查目标物体是否属于小物体类别
         if self.scenegraph.obj_goal in self.scenegraph.small_objects:
+            # 获取场景图中分割结果的数量
             self.segment_num = len(self.scenegraph.segment2d_results)
+            # 初始化目标物体掩码列表
             goal_mask = []
+            # 如果当前分割结果比上一次更多，说明有新的分割结果产生
             if self.segment_num > self.last_segment_num:
+                # 更新最后一次分割结果的数量
                 self.last_segment_num = self.segment_num
+                # 获取最新的分割结果
                 segment2d_result = self.scenegraph.segment2d_results[-1]
+                # 初始化索引列表，用于存储目标物体的掩码索引
                 indices = []
+                # 遍历分割结果中的每个标题
                 for index, element in enumerate(segment2d_result['caption']):
+                    # 如果目标物体在标题中出现
                     if self.obj_goal_sg in element.split(' '):
+                        # 遍历场景图中的所有节点
                         for node in self.scenegraph.nodes:
+                            # 如果节点是目标节点，并且图像索引和掩码索引匹配
                             if node.is_goal_node and node.object['image_idx'][-1] == len(self.scenegraph.segment2d_results) - 1 and node.object['mask_idx'][-1] == index:
+                                # 将该索引添加到索引列表中
                                 indices.append(index)
+                # 根据索引获取目标物体的掩码
                 goal_mask = [segment2d_result['mask'][index] for index in indices]
+            # 如果找到目标物体的掩码
             if len(goal_mask) > 0:
+                # 保存当前可能目标的状态，用于后续比较
                 possible_goal_detected_before = copy.deepcopy(self.found_possible_goal)
+                # 遍历每个目标物体的掩码
                 for mask in goal_mask:
+                    # 计算掩码的中心点坐标（先计算掩码中非零位置的均值）
                     center_point = torch.tensor(np.argwhere(mask).mean(axis=0).astype(int))
+                    # 转换坐标顺序，从(y,x)变为(x,y)
                     center_point = torch.tensor([center_point[1], center_point[0]])
+                    # 计算中心点相对于图像中心的方向角度
                     temp_direction = (center_point[0] - 320) * 79 / 640
+                    # 获取中心点处的深度值
                     temp_distance = self.depth[center_point[1],center_point[0],0]
+                    # 初始化参数，用于处理深度值异常的情况
                     k = 0
                     pos_neg = 1
+                    # 如果深度值异常（过大）且点在图像范围内，尝试查找周围有效的深度值
                     while temp_distance >= 100 and 0<center_point[1]+int(pos_neg*k)<479 and 0<center_point[0]+int(pos_neg*k)<639:
+                        # 切换方向（左右或上下）
                         pos_neg *= -1
+                        # 增加搜索步长
                         k += 0.5
+                        # 获取周围点的深度值中的较大值
                         temp_distance = max(self.depth[center_point[1]+int(pos_neg*k),center_point[0],0],
                         self.depth[center_point[1],center_point[0]+int(pos_neg*k),0])
-                        
+                    
+                    # 如果距离仍然大于阈值，将其标记为可能的目标
                     if temp_distance >= self.distance_threshold:
                         self.found_possible_goal = True
+                    # 如果距离小于阈值，将其标记为确定的目标
                     else:
+                        # 如果已经找到目标，并且当前距离小于阈值，增加找到目标的次数
                         if self.found_goal:
                             if temp_distance < self.distance_threshold:
                                 self.found_goal_times = self.found_goal_times + 1
+                        # 标记已找到目标
                         self.found_goal = True
+                        # 不再是可能的目标
                         self.found_possible_goal = False
                     
-                    ## select the closest goal
+                    ## 选择最近的目标
                     direction = temp_direction
                     distance = temp_distance
+                    # 如果当前距离小于记录的最短距离，更新最短距离和对应的方向
                     if distance < shortest_distance:
                         shortest_distance = distance
                         shortest_distance_angle = direction
                 
+                # 如果找到确定的目标，更新目标的GPS坐标
                 if self.found_goal:
                     self.goal_gps = self.get_goal_gps(observations, shortest_distance_angle, shortest_distance)
+                # 如果之前没有检测到可能的目标，更新可能目标的临时GPS坐标
                 elif not possible_goal_detected_before:
-                    # if detected a long goal before, then don't change it until see a goal within 5 meters
+                    # 如果之前检测到距离较远的目标，在看到5米内的目标前不改变它
                     self.possible_goal_temp_gps = self.get_goal_gps(observations, shortest_distance_angle, shortest_distance)
+            # 如果没有找到目标物体的掩码
             else:
+                # 如果之前找到了目标，重置目标状态
                 if self.found_goal:
                     self.found_goal = False
                     self.found_goal_times = 0
             return
+        # 如果目标物体不属于小物体类别（即属于大物体类别）
         else:
+            # 如果检测到了目标物体的边界框
             if len(goal_bbox) > 0:
+                # 记录下在处理当前目标前，是否已经检测到可能的目标
                 possible_goal_detected_before = copy.deepcopy(self.found_possible_goal)
+                # 将目标物体的边界框列表转换为张量
                 goal_prediction.bbox = torch.stack(goal_bbox)
+                # 遍历每个目标物体的边界框
                 for box in goal_prediction.bbox:
+                    # 将边界框坐标转换为整数类型
                     box = box.to(torch.int64)
+                    # 计算边界框的中心点坐标
                     center_point = (box[:2] + box[2:]) // 2
+                    # 计算中心点相对于图像中心的方向角度
                     temp_direction = (center_point[0] - 320) * 79 / 640
+                    # 获取中心点处的深度值
                     temp_distance = self.depth[center_point[1],center_point[0],0]
+                    # 根据观测、方向和距离计算目标的GPS坐标
                     goal_gps = self.get_goal_gps(observations, temp_direction, temp_distance)
+                    # 初始化参数，用于处理深度值异常的情况
                     k = 0
                     pos_neg = 1
+                    # 如果深度值异常（过大）且点在图像范围内，尝试查找周围有效的深度值
                     while temp_distance >= 100 and 0<center_point[1]+int(pos_neg*k)<479 and 0<center_point[0]+int(pos_neg*k)<639:
+                        # 切换方向（左右或上下）
                         pos_neg *= -1
+                        # 增加搜索步长
                         k += 0.5
+                        # 获取周围点的深度值中的较大值
                         temp_distance = max(self.depth[center_point[1]+int(pos_neg*k),center_point[0],0],
                         self.depth[center_point[1],center_point[0]+int(pos_neg*k),0])
                         
+                    # 如果距离仍然大于阈值，将其标记为可能的目标
                     if temp_distance >= self.distance_threshold:
                         self.found_possible_goal = True
+                    # 如果距离小于阈值，将其标记为确定的目标
                     else:
+                        # 计算目标合并的阈值（像素级别）
                         thres = int(self.goal_merge_threshold * 100 / self.map_resolution)
+                        # 检查计算出的目标GPS坐标是否在地图范围内
                         if 0 <= int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) < self.map_size and 0 <= int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) < self.map_size:
+                            # 获取目标GPS坐标在地图上的局部区域
                             goal_gps_map_local = self.goal_gps_map[max(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) - thres, 0):min(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution) + thres, self.map_size - 1), max(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) - thres, 0):min(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution) + thres, self.map_size - 1)]
+                            # 如果局部区域已经存在目标点
                             if goal_gps_map_local.max() > 0:
+                                # 在该局部区域的最大值位置上加1，表示多次检测到该目标
                                 goal_gps_map_local[np.where(goal_gps_map_local == goal_gps_map_local.max())[0][0], np.where(goal_gps_map_local == goal_gps_map_local.max())[1][0]] = goal_gps_map_local[np.where(goal_gps_map_local == goal_gps_map_local.max())[0][0], np.where(goal_gps_map_local == goal_gps_map_local.max())[1][0]] + 1
+                            # 如果局部区域不存在目标点
                             else:
+                                # 在计算出的目标GPS坐标位置标记为1，表示新检测到的目标
                                 self.goal_gps_map[min(max(int(self.map_size_cm/10+goal_gps[1]*100/self.resolution), 0), self.map_size), min(max(int(self.map_size_cm/10+goal_gps[0]*100/self.resolution), 0), self.map_size)] = 1
+                        # 标记不再是可能的目标
                         self.found_possible_goal = False
                     
+                    # 更新当前物体的方向和距离
                     direction = temp_direction
                     distance = temp_distance
+                    # 如果当前距离小于记录的最短距离，更新最短距离和对应的方向
                     if distance < shortest_distance:
                         shortest_distance = distance
                         shortest_distance_angle = direction
                 
+                # 更新找到目标的次数为目标GPS地图上的最大值
                 self.found_goal_times = self.goal_gps_map.max()
+                # 如果找到目标的次数大于等于场景图配置中物体最小检测次数
                 if self.found_goal_times >= self.scenegraph.cfg.obj_min_detections:
+                    # 标记已找到目标
                     self.found_goal = True
 
+                # 如果已找到确定的目标
                 if self.found_goal:
+                    # 获取目标GPS地图上值最大的点的坐标，并翻转顺序（从(y,x)到(x,y)）
                     self.goal_gps = np.flip(np.array(np.where(self.goal_gps_map == self.goal_gps_map.max()))[:, 0])
+                    # 将地图坐标转换为实际的GPS坐标
                     self.goal_gps = (self.goal_gps - self.map_size_cm / 10) / 100 * self.resolution
+                # 如果之前没有检测到可能的目标，并且当前也没有找到确定的目标
                 elif not possible_goal_detected_before:
+                    # 更新可能目标的临时GPS坐标为当前最近的物体位置
                     self.possible_goal_temp_gps = self.get_goal_gps(observations, shortest_distance_angle, shortest_distance)
+            # 结束函数执行
             return
                         
     def act(self, observations):
+        # 如果总步数超过500步，则停止行动，返回动作0 (停止)
         if self.total_steps >= 500:
             return {"action": 0}
         
+        # 总步数加1
         self.total_steps += 1
+        # 如果是导航的第一步
         if self.navigate_steps == 0:
+            # 初始化目标房间和目标物体的共现概率数组
             self.prob_array_room = self.co_occur_room_mtx[self.goal_idx[self.obj_goal]]
             self.prob_array_obj = self.co_occur_mtx[self.goal_idx[self.obj_goal]]
 
-        observations["depth"][observations["depth"]==0.5] = 100 # don't construct unprecise map with distance less than 0.5 m
+        # 将深度图中0.5的值（可能表示无效）替换为100，避免构建不精确的地图
+        observations["depth"][observations["depth"]==0.5] = 100 
+        # 更新当前深度图
         self.depth = observations["depth"]
+        # 更新当前RGB图像 (BGR转RGB)
         self.rgb = observations["rgb"][:,:,[2,1,0]]
+        # 更新用于可视化的RGB图像
         self.rgb_visualization = observations["rgb"]
 
-        self.scenegraph.set_agent(self)
-        self.scenegraph.set_navigate_steps(self.navigate_steps)
-        self.scenegraph.set_obj_goal(self.obj_goal, self.obj_goal_sg)
-        self.scenegraph.set_room_map(self.room_map)
-        self.scenegraph.set_fbe_free_map(self.fbe_free_map)
-        self.scenegraph.set_observations(observations)
-        self.scenegraph.set_full_map(self.full_map)
-        self.scenegraph.set_full_pose(self.full_pose)
-        self.scenegraph.update_scenegraph()
+        # --- 更新场景图模块的状态 ---
+        # 设置场景图中的agent
+        self.scenegraph.set_agent(self) 
+        # 设置导航步数
+        self.scenegraph.set_navigate_steps(self.navigate_steps) 
+        # 设置目标物体及其场景图表示
+        self.scenegraph.set_obj_goal(self.obj_goal, self.obj_goal_sg) 
+        # 设置房间地图
+        self.scenegraph.set_room_map(self.room_map) 
+        # 设置基于边界探索的自由空间地图
+        self.scenegraph.set_fbe_free_map(self.fbe_free_map) 
+        # 设置当前观测
+        self.scenegraph.set_observations(observations) 
+        # 设置完整地图
+        self.scenegraph.set_full_map(self.full_map) 
+        # 设置完整姿态
+        self.scenegraph.set_full_pose(self.full_pose) 
+        # 更新场景图
+        self.scenegraph.update_scenegraph() 
         
+        # 更新语义地图和自由空间地图
         self.update_map(observations)
         self.update_free_map(observations)
         
+        # --- 初始探索阶段的固定动作序列 ---
+        # 这些动作用于在开始时获取环境的全景信息
         if self.total_steps == 1:
-            self.sem_map_module.set_view_angles(30)
-            self.free_map_module.set_view_angles(30)
-            return {"action": 5}
+            self.sem_map_module.set_view_angles(30) # 设置语义地图模块的视角
+            self.free_map_module.set_view_angles(30) # 设置自由空间地图模块的视角
+            return {"action": 5} # 执行动作5 (可能对应特定的旋转或移动)
         elif self.total_steps <= 7:
-            return {"action": 6}
+            return {"action": 6} # 执行动作6
         elif self.total_steps == 8:
             self.sem_map_module.set_view_angles(60)
             self.free_map_module.set_view_angles(60)
@@ -395,114 +504,153 @@ class SG_Nav_Agent():
         elif self.total_steps <= 15:
             self.sem_map_module.set_view_angles(30)
             self.free_map_module.set_view_angles(30)
-            return {"action": 4}
+            return {"action": 4} # 执行动作4
         elif self.total_steps <= 16:
-            self.sem_map_module.set_view_angles(0)
+            self.sem_map_module.set_view_angles(0) # 将视角设置回0度 (正前方)
             self.free_map_module.set_view_angles(0)
             return {"action": 4}
+        
+        # --- 在初始探索后，如果还没找到目标，则进行物体和房间检测 ---
         if self.total_steps <= 22 and not self.found_goal:
+            # 收集全景图像和深度信息
             self.panoramic.append(observations["rgb"][:,:,[2,1,0]])
             self.panoramic_depth.append(observations["depth"])
+            # 进行物体检测
             self.detect_objects(observations)
+            # 进行房间检测
             room_detection_result = self.glip_demo.inference(observations["rgb"][:,:,[2,1,0]], rooms_captions)
+            # 更新房间地图
             self.update_room_map(observations, room_detection_result)
-            if not self.found_goal: # if found a goal, directly go to it
+            # 如果在这次检测后仍未找到目标，则继续执行动作6 (通常是旋转以获取更多视角)
+            if not self.found_goal: 
                 return {"action": 6}
                     
-        if np.linalg.norm(observations["gps"] - self.last_gps) >= 0.05:
-            self.move_steps += 1
-            self.not_move_steps = 0
-            if self.using_random_goal:
-                self.move_since_random += 1
-        else:
-            self.not_move_steps += 1
+        # --- 检查agent是否移动 --- 
+        # 通过比较当前GPS和上一步的GPS来判断
+        if np.linalg.norm(observations["gps"] - self.last_gps) >= 0.05: # 如果移动距离大于等于0.05米
+            self.move_steps += 1 # 移动步数加1
+            self.not_move_steps = 0 # 未移动步数清零
+            if self.using_random_goal: # 如果当前正在使用随机目标
+                self.move_since_random += 1 # 自上次设置随机目标以来的移动步数加1
+        else: # 如果没有移动
+            self.not_move_steps += 1 # 未移动步数加1
             
+        # 更新上一步的GPS坐标
         self.last_gps = observations["gps"]
         
+        # 执行场景图的感知操作
         self.scenegraph.perception()
           
+        # 记录当前agent的完整姿态历史
         self.history_pose.append(self.full_pose.cpu().detach().clone())
+        # 准备输入给路径规划器的姿态信息
         input_pose = np.zeros(7)
-        input_pose[:3] = self.full_pose.cpu().numpy()
-        input_pose[1] = self.map_size_cm/100 - input_pose[1]
-        input_pose[2] = -input_pose[2]
-        input_pose[4] = self.full_map.shape[-2]
-        input_pose[6] = self.full_map.shape[-1]
+        input_pose[:3] = self.full_pose.cpu().numpy() # x, y, theta (角度)
+        input_pose[1] = self.map_size_cm/100 - input_pose[1] # y坐标转换
+        input_pose[2] = -input_pose[2] # 角度转换
+        input_pose[4] = self.full_map.shape[-2] # 地图高度
+        input_pose[6] = self.full_map.shape[-1] # 地图宽度
+        # 获取可通行区域地图、当前起点和起点方向
         traversible, cur_start, cur_start_o = self.get_traversible(self.full_map.cpu().numpy()[0,0,::-1], input_pose)
         
-        if self.found_goal: 
-            self.not_use_random_goal()
-            self.goal_map = np.zeros(self.full_map.shape[-2:])
+        # --- 根据目标状态设置目标地图 (goal_map) ---
+        if self.found_goal: # 如果找到了确定的目标
+            self.not_use_random_goal() # 停止使用随机目标
+            self.goal_map = np.zeros(self.full_map.shape[-2:]) # 初始化目标地图
+            # 在目标地图上标记目标位置 (确保坐标在地图范围内)
             self.goal_map[max(0,min(self.map_size - 1,int(self.map_size_cm/10+self.goal_gps[1]*100/self.resolution))), max(0,min(self.map_size - 1,int(self.map_size_cm/10+self.goal_gps[0]*100/self.resolution)))] = 1
-        elif self.found_possible_goal: 
+        elif self.found_possible_goal: # 如果找到了可能的目标
             self.not_use_random_goal()
             self.goal_map = np.zeros(self.full_map.shape[-2:])
+            # 在目标地图上标记可能的目标位置
             self.goal_map[max(0,min(self.map_size - 1,int(self.map_size_cm/10+self.possible_goal_temp_gps[1]*100/self.resolution))), max(0,min(self.map_size - 1,int(self.map_size_cm/10+self.possible_goal_temp_gps[0]*100/self.resolution)))] = 1
-        elif self.first_fbe:
+        elif self.first_fbe: # 如果是第一次进行边界探索 (Frontier-Based Exploration)
+            # 使用FBE算法找到一个探索目标点
             self.goal_loc = self.fbe(traversible, cur_start)
             self.not_use_random_goal()
-            self.first_fbe = False
+            self.first_fbe = False # 标记第一次FBE已完成
             self.goal_map = np.zeros(self.full_map.shape[-2:])
-            if self.goal_loc is None:
-                self.random_this_ex += 1
-                self.goal_map = self.set_random_goal()
-                self.using_random_goal = True
-            else:
-                self.fronter_this_ex += 1
-                self.goal_map[self.goal_loc[0], self.goal_loc[1]] = 1
-                self.goal_map = self.goal_map[::-1]
+            if self.goal_loc is None: # 如果FBE没有找到目标点
+                self.random_this_ex += 1 # 记录使用随机目标的次数
+                self.goal_map = self.set_random_goal() # 设置一个随机目标
+                self.using_random_goal = True # 标记正在使用随机目标
+            else: # 如果FBE找到了目标点
+                self.fronter_this_ex += 1 # 记录使用FBE目标的次数
+                self.goal_map[self.goal_loc[0], self.goal_loc[1]] = 1 # 在目标地图上标记FBE目标点
+                self.goal_map = self.goal_map[::-1] # 翻转目标地图 (可能与坐标系有关)
         
-        # local policy
+        # --- 局部路径规划 --- 
+        # 根据可通行区域、目标地图、agent姿态等信息规划下一步动作
         stg_y, stg_x, replan, number_action = self._plan(traversible, self.goal_map, self.full_pose, cur_start, cur_start_o, self.found_goal)
+        # 如果找到了可能的目标，但规划出的动作为0 (停止)，则重置可能目标状态
         if self.found_possible_goal and number_action == 0:
             self.found_possible_goal = False
         
-        # reach long-term goal and fbe
+        # --- 处理到达长期目标或FBE目标的情况 ---
+        # 条件：1. 未找到确定或可能的目标，且规划动作为0 (停止)
+        #       2. 正在使用随机目标，且自上次设置随机目标以来移动超过20步
         if (not self.found_goal and not self.found_possible_goal and number_action == 0) or (self.using_random_goal and self.move_since_random > 20): 
             if (self.using_random_goal and self.move_since_random > 20):
+                # 获取当前随机目标的位置
                 goal_x, goal_y = np.where(self.goal_map == 1)
+                # 在FBE自由空间地图中，将当前随机目标点周围区域标记为不可探索 (0)，避免重复探索
                 x_0 = max(goal_x[0] - 8, 0)
                 y_0 = max(goal_y[0] - 8, 0)
                 x_1 = min(goal_x[0] + 8, self.map_size)
                 y_1 = min(goal_y[0] + 8, self.map_size)
                 self.fbe_free_map[x_0:x_1, y_0:y_1] = 0
+            # 重新进行FBE探索
             self.goal_loc = self.fbe(traversible, cur_start)
             self.not_use_random_goal()
             self.goal_map = np.zeros(self.full_map.shape[-2:])
-            if self.goal_loc is None:
+            if self.goal_loc is None: # 如果FBE未找到新目标
                 self.random_this_ex += 1
-                self.goal_map = self.set_random_goal()
+                self.goal_map = self.set_random_goal() # 设置新的随机目标
                 self.using_random_goal = True
-            else:
+            else: # 如果FBE找到了新目标
                 self.fronter_this_ex += 1
                 self.goal_map[self.goal_loc[0], self.goal_loc[1]] = 1
                 self.goal_map = self.goal_map[::-1]
+            # 重新进行局部路径规划
             stg_y, stg_x, replan, number_action = self._plan(traversible, self.goal_map, self.full_pose, cur_start, cur_start_o, self.found_goal)
         
-        self.loop_time = 0
+        # --- 处理卡住或无法规划的情况 (循环设置随机目标直到可以移动) ---
+        self.loop_time = 0 # 初始化循环次数
+        # 条件：1. 未找到确定目标，且规划动作为0 (停止)
+        #       2. 未移动步数超过7步 (可能卡住)
         while (not self.found_goal and number_action == 0) or self.not_move_steps >= 7:
-            if self.not_move_steps >= 7:
+            if self.not_move_steps >= 7: # 如果是因为卡住
+                # 重置目标状态，强制重新探索
                 self.found_goal = False
                 self.found_possible_goal = False
-            self.loop_time += 1
-            self.random_this_ex += 1
-            if self.loop_time > 20:
+            self.loop_time += 1 # 循环次数加1
+            self.random_this_ex += 1 # 记录使用随机目标的次数
+            if self.loop_time > 20: # 如果循环超过20次，认为无法解决，停止行动
                 return {"action": 0}
-            self.not_move_steps = 0
-            self.goal_map = self.set_random_goal()
-            self.using_random_goal = True
+            self.not_move_steps = 0 # 重置未移动步数
+            self.goal_map = self.set_random_goal() # 设置随机目标
+            self.using_random_goal = True # 标记正在使用随机目标
+            # 重新进行局部路径规划
             stg_y, stg_x, replan, number_action = self._plan(traversible, self.goal_map, self.full_pose, cur_start, cur_start_o, self.found_goal)
         
+        # 如果开启了可视化
         if self.args.visualize:
+            # 进行可视化操作
             self.visualize(traversible, observations, number_action)
 
+        # 更新观测中的相对目标GPS和罗盘信息
         observations["pointgoal_with_gps_compass"] = self.get_relative_goal_gps(observations)
 
+        # 更新上一步的agent位置
         self.last_loc = copy.deepcopy(self.full_pose)
+        # 更新上一步的动作
         self.prev_action = number_action
+        # 导航步数加1
         self.navigate_steps += 1
+        # 清理CUDA缓存
         torch.cuda.empty_cache()
         
+        # 返回规划出的动作
         return {"action": number_action}
     
     def not_use_random_goal(self):
@@ -818,19 +966,26 @@ class SG_Nav_Agent():
             self.visualize_agent_and_goal(paper_map_trans)
             agent_coordinate = (int(self.history_pose[-1][0]*100/self.resolution), int((self.map_size_cm/100-self.history_pose[-1][1])*100/self.resolution))
             occupancy_map = crop_around_point((paper_map_trans.permute(1, 2, 0) * 255).numpy().astype(np.uint8), agent_coordinate, (150, 200))
-            visualize_image = np.full((450, 800, 3), 255, dtype=np.uint8)
-            visualize_image = add_resized_image(visualize_image, self.rgb_visualization, (10, 60), (320, 240))
+            
+            annotated_rgb = self.scenegraph.visualize_3d_detections(self.rgb_visualization)
+            topological_map = self.scenegraph.visualize_topological_map()
+
+            visualize_image = np.full((450, 1600, 3), 255, dtype=np.uint8)
+            visualize_image = add_resized_image(visualize_image, annotated_rgb, (10, 60), (320, 240))
             visualize_image = add_resized_image(visualize_image, occupancy_map, (340, 60), (180, 240))
+            visualize_image = add_resized_image(visualize_image, topological_map, (810, 60), (780, 340))
             visualize_image = add_rectangle(visualize_image, (10, 60), (330, 300), (128, 128, 128), thickness=1)
             visualize_image = add_rectangle(visualize_image, (340, 60), (520, 300), (128, 128, 128), thickness=1)
             visualize_image = add_rectangle(visualize_image, (540, 60), (790, 165), (128, 128, 128), thickness=1)
             visualize_image = add_rectangle(visualize_image, (540, 195), (790, 300), (128, 128, 128), thickness=1)
             visualize_image = add_rectangle(visualize_image, (10, 350), (790, 400), (128, 128, 128), thickness=1)
+            visualize_image = add_rectangle(visualize_image, (810, 60), (1590, 400), (128, 128, 128), thickness=1)
             visualize_image = add_text(visualize_image, "Observation (Goal: {})".format(self.obj_goal), (70, 50), font_scale=0.5, thickness=1)
             visualize_image = add_text(visualize_image, "Occupancy Map", (370, 50), font_scale=0.5, thickness=1)
             visualize_image = add_text(visualize_image, "Scene Graph Nodes", (580, 50), font_scale=0.5, thickness=1)
             visualize_image = add_text(visualize_image, "Scene Graph Edges", (580, 185), font_scale=0.5, thickness=1)
             visualize_image = add_text(visualize_image, "LLM Explanation", (330, 340), font_scale=0.5, thickness=1)
+            visualize_image = add_text(visualize_image, "Topological Map", (1170, 50), font_scale=0.5, thickness=1)
             visualize_image = add_text_list(visualize_image, line_list(self.text_node, 40), (550, 80), font_scale=0.3, thickness=1)
             visualize_image = add_text_list(visualize_image, line_list(self.text_edge, 40), (550, 215), font_scale=0.3, thickness=1)
             visualize_image = add_text_list(visualize_image, line_list(self.explanation, 150), (20, 370), font_scale=0.3, thickness=1)
